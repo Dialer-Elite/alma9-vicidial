@@ -1,0 +1,15 @@
+# Make sure to change the const for email and domain in below file
+cd /usr/src/vicidial-install-scripts
+
+# Stop firewalld first (required if SSL was skipped during install)
+systemctl stop firewalld
+
+cd /usr/src/vicidial-install-scripts
+chmod +x vicidial-enable-webrtc.sh
+./vicidial-enable-webrtc.sh
+# Enter your domain when prompted; certbot will obtain a Let's Encrypt cert
+
+# Restart firewalld when done
+systemctl start firewalld
+
+# Test and verify, make sure to test from another machine or another chrome profile

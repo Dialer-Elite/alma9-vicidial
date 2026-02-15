@@ -1,0 +1,33 @@
+Check the port status if it's listing or not
+https://as-medi1-d1.dialerelite.com:8089/httpstatus
+
+1. Admin → Servers (WebSocket URL)
+	Go to Admin → Servers.
+	Edit the server(s) that run Asterisk (your dialer(s)).
+	Set:
+	Web socket URL
+	Single server: wss://YOUR_DOMAIN:8089/ws
+	Cluster (DB+Web + dialers): wss://DIALER_IP_or_HOSTNAME:8089/ws
+	External web socket URL (if used): same as above for external access.
+	Save.
+	The WebSocket must point to the Asterisk host, since that’s where the WebRTC/WebSocket endpoint runs.
+
+
+2. Admin → System Settings
+	Go to Admin → System Settings.
+	Set Sounds web server (or similar) to your HTTPS domain, e.g. https://YOUR_DOMAIN.
+
+
+3. Admin → Phones (SIP_generic template)
+	Go to Admin → Phones.
+	Edit the SIP_generic (or WebRTC) template.
+	Ensure:
+	It uses wss for transport.
+	Certificate paths match your Let’s Encrypt cert (if needed), e.g.:
+	Cert: /etc/letsencrypt/live/YOUR_DOMAIN/cert.pem
+	Key: /etc/letsencrypt/live/YOUR_DOMAIN/privkey.pem
+	Save.
+	vicidial-enable-webrtc.sh often updates this automatically, but verify it matches your domain and cert paths.
+	
+4- Rebuild conf file and reload asterisk and verify
+	
