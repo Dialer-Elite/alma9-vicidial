@@ -1,0 +1,134 @@
+# ViciDial – Adding New Dialer Servers to Cluster
+# Alma Linux 9 | Based on technationals.com/dl/kt.txt and carpenox/vicidial-install-scripts
+# Use this AFTER your DB+Web server is installed and MySQL is open to dialer IPs.
+
+# =============================================================================
+# PREREQUISITES
+# =============================================================================
+# - One DB+Web server already running (main-installer, Asterisk disabled).
+# - MySQL on DB+Web: bind-address = 0.0.0.0, firewall allows 3306 from dialer IPs.
+# - You know: DB+Web server IP, and the IP of each new dialer server.
+# - Each new dialer: Alma Linux 9, fresh or minimal install.
+
+# =============================================================================
+# COMMON PREP (on every new dialer server, before addon scripts)
+# =============================================================================
+
+# Optional: English locale
+dnf install -y glibc-langpack-en
+localectl set-locale en_US.UTF-8
+
+# Timezone
+timedatectl set-timezone America/New_York
+
+# Updates and EPEL
+dnf check-update
+dnf update -y
+dnf install -y epel-release
+dnf update -y
+
+# Git and kernel packages
+dnf install -y git
+dnf install -y 'kernel*' --exclude='kernel-debug*'
+
+# Disable SELinux (required for ViciDial)
+sed -i 's/SELINUX=enforcing/SELINUX=disabled/g' /etc/selinux/config
+# If file has SELINUX=permissive instead:
+# sed -i 's/SELINUX=permissive/SELINUX=disabled/g' /etc/selinux/config
+
+# Clone install scripts
+cd /usr/src
+git clone https://github.com/carpenox/vicidial-install-scripts.git
+cd vicidial-install-scripts
+
+# Set hostname for THIS dialer (use FQDN or short name, unique per server)
+hostnamectl set-hostname dial1.dialerelite.com
+
+# Reboot so SELinux change takes effect
+reboot
+
+# =============================================================================
+# AFTER REBOOT – STEP A: ON DB+WEB SERVER (once per new dialer)
+# =============================================================================
+# Run this on the DB+Web server BEFORE or right after installing the dialer.
+# Replace DIALER_IP with the new dialer server's IP.
+
+cd /usr/src/vicidial-install-scripts
+chmod +x add-dialer-to-DB.sh
+./add-dialer-to-DB.sh
+# When prompted: enter MySQL root password (or Enter if none).
+# When prompted "Enter the dialer IP:", enter the NEW DIALER SERVER IP (e.g. 157.90.236.141).
+
+# =============================================================================
+# STEP B: ON THE NEW DIALER SERVER (Alma 9, after common prep + reboot)
+# =============================================================================
+
+-------- Make sure database is accessible if not change the db password --------------------
+
+asterisk config	vi /etc/asterisk/asterisk.conf
+db password, etc	vi /etc/astguiclient.conf
+-------------------------------------------------------
+cd /usr/src/vicidial-install-scripts
+chmod +x addon-dialer-alma9.sh
+./addon-dialer-alma9.sh
+# Wait for it to finish.
+
+# Link this dialer to the DB+Web server
+chmod +x run-on-dialer-servers-cluster.sh
+./run-on-dialer-servers-cluster.sh
+# When prompted "Enter the database IP:", enter the DB+WEB SERVER IP (e.g. 157.90.236.140).
+
+# =============================================================================
+# STEP C: VERIFY CRON AND BOOT (on each dialer)
+# =============================================================================
+
+# Cron must run every minute (addon usually adds it; verify)
+crontab -l
+# Should include: * * * * * /usr/share/astguiclient/ADMIN_keepalive_ALL.pl
+
+# If missing, add it:
+# (crontab -l 2>/dev/null; echo "* * * * * /usr/share/astguiclient/ADMIN_keepalive_ALL.pl") | crontab -
+
+# Ensure rc.local runs at boot (Asterisk + DAHDI start here)
+systemctl enable rc-local
+# Do NOT disable or comment out Asterisk/DAHDI/start_asterisk_boot.pl on dialers.
+
+# Reboot and verify
+reboot
+# After reboot:
+#   screen -ls          -> should show asterisk + AST_* sessions
+#   asterisk -rx "core show channels"  -> Asterisk should respond
+
+# =============================================================================
+# ADDING EACH ADDITIONAL DIALER (repeat for dialer 2, 3, ...)
+# =============================================================================
+# For every extra dialer:
+#   1. On DB+Web: run ./add-dialer-to-DB.sh, enter THAT dialer's IP.
+#   2. On the new server: common prep (above) + reboot, then ./addon-dialer-alma9.sh, then ./run-on-dialer-servers-cluster.sh with DB+Web IP.
+#   3. Verify cron and rc.local, reboot, check screen -ls and Asterisk.
+
+# =============================================================================
+# OPTIONAL – Fix "Unable to lookup SERVER_EXTERNAL_IP" (if seen in pjsip)
+# =============================================================================
+# On the dialer:
+# sed -i 's/SERVER_EXTERNAL_IP/0.0.0.0/' /etc/asterisk/pjsip.conf
+
+# =============================================================================
+# OPTIONAL – WebRTC on dialers
+# =============================================================================
+# If using webphones/WebRTC, each dialer needs:
+# - Asterisk http.conf / sip.conf for WebSocket (e.g. port 8089).
+# - Admin -> Servers: set web_socket_url for this dialer (e.g. wss://dial1.dialerelite.com:8089/ws).
+# - Firewall: allow 8089/tcp on the dialer.
+# - SSL certs on dialer for wss/DTLS if required.
+
+# =============================================================================
+# REFERENCES
+# =============================================================================
+# technationals.com/dl/kt.txt  (§4 Building a ViciDial Cluster)
+# dialer.one – How to Install ViciDial on Alma Linux 9
+# github.com/carpenox/vicidial-install-scripts (addon-dialer-alma9.sh, add-dialer-to-DB.sh, run-on-dialer-servers-cluster.sh)
+
+# =============================================================================
+# END
+# =============================================================================

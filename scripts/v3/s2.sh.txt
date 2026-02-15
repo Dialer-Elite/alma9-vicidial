@@ -1,0 +1,108 @@
+#!/bin/bash
+# Run after reboot. Constants feed main-installer prompts (no typing). Edit consts, run as root.
+set -e
+
+INSTALL_DIR="/usr/src/vicidial-install-scripts"
+STATE_FILE="/root/vicidial-alma9-setup/.prep-state"
+RESPONSE_FILE="/root/vicidial-alma9-setup/main-installer-responses.txt"
+
+# =============================================================================
+# Constants. Order: hostname, 5x Enter, (mysql uses MYSQL_PWD), DOMAINNAME for webrtc, 1x Enter (reboot).
+# =============================================================================
+DEFAULT_ROLE="asterisk"
+DEFAULT_INSTALLER_HOSTNAME="as-medi1-d1.dialerelite.com"
+DEFAULT_MYSQL_ROOT_PASSWORD="ViciDB_6y5e1v_e6W"
+DEFAULT_SSL_EMAIL="info@dialerelite.com"
+# For asterisk role only
+DEFAULT_DB_SERVER_IP="157.90.236.140"
+# DB cron/custom user passwords (install.pl uses defaults; must match DB server)
+DEFAULT_DB_CRON_PASSWORD="ViciDB_6y5e1v_e6W"
+DEFAULT_DB_CUSTOM_PASSWORD="ViciDB_6y5e1v_e6W"
+
+unset ROLE INSTALLER_HOSTNAME MYSQL_ROOT_PASSWORD SSL_EMAIL DB_SERVER_IP DB_CRON_PASSWORD DB_CUSTOM_PASSWORD
+[[ "$EUID" -eq 0 ]] || { echo "Run as root." >&2; exit 1; }
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --role=*)              ROLE="${1#*=}" ;;
+    --hostname=*)          INSTALLER_HOSTNAME="${1#*=}" ;;
+    --mysql-password=*)    MYSQL_ROOT_PASSWORD="${1#*=}" ;;
+    --ssl-email=*)         SSL_EMAIL="${1#*=}" ;;
+    --db-server-ip=*)      DB_SERVER_IP="${1#*=}" ;;
+    --db-cron-password=*)  DB_CRON_PASSWORD="${1#*=}" ;;
+    --db-custom-password=*) DB_CUSTOM_PASSWORD="${1#*=}" ;;
+    -h|--help)             echo "Usage: $0 [--role=dbweb|asterisk] [--hostname=NAME] [--mysql-password=PWD] [--ssl-email=EMAIL] [--db-server-ip=IP] [--db-cron-password=PWD] [--db-custom-password=PWD]"; exit 0 ;;
+    *) echo "Unknown: $1" >&2; exit 1 ;;
+  esac
+  shift
+done
+
+if [[ -f "$STATE_FILE" ]]; then
+  . "$STATE_FILE" 2>/dev/null || true
+fi
+ROLE="${ROLE:-$DEFAULT_ROLE}"
+INSTALLER_HOSTNAME="${INSTALLER_HOSTNAME:-${FQDN:-$DEFAULT_INSTALLER_HOSTNAME}}"
+MYSQL_ROOT_PASSWORD="${MYSQL_ROOT_PASSWORD:-$DEFAULT_MYSQL_ROOT_PASSWORD}"
+SSL_EMAIL="${SSL_EMAIL:-$DEFAULT_SSL_EMAIL}"
+DB_SERVER_IP="${DB_SERVER_IP:-$DEFAULT_DB_SERVER_IP}"
+DB_CRON_PASSWORD="${DB_CRON_PASSWORD:-$DEFAULT_DB_CRON_PASSWORD}"
+DB_CUSTOM_PASSWORD="${DB_CUSTOM_PASSWORD:-$DEFAULT_DB_CUSTOM_PASSWORD}"
+
+[[ -d "$INSTALL_DIR" ]] || { echo "Missing $INSTALL_DIR. Run prepare-and-install.sh, then reboot." >&2; exit 1; }
+cd "$INSTALL_DIR"
+
+if [[ "$ROLE" == "dbweb" ]]; then
+  if [[ -n "$MYSQL_ROOT_PASSWORD" ]]; then
+    export MYSQL_PWD="$MYSQL_ROOT_PASSWORD"
+  fi
+  # Patch webrtc script so certbot uses --email and --agree-tos when SSL_EMAIL set
+  if [[ -n "$SSL_EMAIL" ]] && [[ -f "$INSTALL_DIR/vicidial-enable-webrtc.sh" ]]; then
+    sed -i.bak 's|certbot --apache -d $DOMAINNAME|& --email '"$SSL_EMAIL"' --agree-tos|' "$INSTALL_DIR/vicidial-enable-webrtc.sh"
+  fi
+  # Prompts: 1 hostname, 5x "Press Enter", (mysql), "read DOMAINNAME" in webrtc, 1x "Press Enter to Reboot"
+  printf '%s\n\n\n\n\n%s\n\n' "$INSTALLER_HOSTNAME" "$INSTALLER_HOSTNAME" > "$RESPONSE_FILE"
+  < "$RESPONSE_FILE" ./main-installer.sh
+  rm -f "$RESPONSE_FILE"
+  [[ -f "$INSTALL_DIR/vicidial-enable-webrtc.sh.bak" ]] && mv "$INSTALL_DIR/vicidial-enable-webrtc.sh.bak" "$INSTALL_DIR/vicidial-enable-webrtc.sh"
+  unset MYSQL_PWD
+elif [[ "$ROLE" == "asterisk" ]]; then
+  [[ -z "$DB_SERVER_IP" ]] && { echo "Set DEFAULT_DB_SERVER_IP or --db-server-ip." >&2; exit 1; }
+  # Precondition: must be able to reach DB server (needed for run-on-dialer-servers-cluster.sh)
+  echo "Checking DB connectivity: $DB_SERVER_IP:3306 ..."
+   if ! timeout 3 bash -c "echo >/dev/tcp/$DB_SERVER_IP/3306" 2>/dev/null; then
+    THIS_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
+    echo "ERROR: Cannot reach DB server $DB_SERVER_IP on port 3306."
+    echo ""
+    echo "On the DB+Web server ($DB_SERVER_IP), run as root:"
+    echo "  1) MariaDB listening on all interfaces:"
+    echo "     grep -q '^bind-address=0.0.0.0' /etc/my.cnf.d/mariadb-server.cnf || (sed -i 's/#bind-address=0.0.0.0/bind-address=0.0.0.0/' /etc/my.cnf.d/mariadb-server.cnf && systemctl restart mariadb)"
+    echo "  2) Open port 3306 in firewall (choose one):"
+    echo "     Allow from this dialer only:  firewall-cmd --permanent --add-rich-rule='rule family=ipv4 source address=$THIS_IP port port=3306 protocol=tcp accept'; firewall-cmd --reload"
+    echo "     Allow from all (less secure): firewall-cmd --permanent --add-port=3306/tcp; firewall-cmd --reload"
+    echo ""
+    echo "Then retry s2.sh."
+    exit 1
+  fi
+  echo "  DB reachable."
+  ./addon-dialer-alma9.sh
+  echo "$DB_SERVER_IP" | ./run-on-dialer-servers-cluster.sh || true
+
+  # install.pl uses default DB passwords; update astguiclient.conf to match DB server
+  ASTGUI="/etc/astguiclient.conf"
+  if [[ -f "$ASTGUI" ]] && [[ -n "$DB_CRON_PASSWORD" ]]; then
+    echo "Updating astguiclient.conf with DB passwords..."
+    perl -i -pe 'BEGIN{$p=shift@ARGV} s/^VARDB_pass => .*/VARDB_pass => \Q$p\E/ if $p' "$DB_CRON_PASSWORD" "$ASTGUI"
+    perl -i -pe 'BEGIN{$p=shift@ARGV} s/^VARDB_custom_pass => .*/VARDB_custom_pass => \Q$p\E/ if $p' "$DB_CUSTOM_PASSWORD" "$ASTGUI"
+    echo "  astguiclient.conf updated."
+  fi
+
+  # Start Asterisk and keepalive (run-on-dialer may have failed due to wrong password)
+  echo "Starting Asterisk and keepalive..."
+  /usr/share/astguiclient/start_asterisk_boot.pl 2>/dev/null || true
+  sleep 2
+  /usr/share/astguiclient/ADMIN_keepalive_ALL.pl --cu3way 2>/dev/null || true
+  echo "Done. Verify: screen -ls, asterisk -rx \"core show version\""
+else
+  echo "Invalid ROLE." >&2
+  exit 1
+fi

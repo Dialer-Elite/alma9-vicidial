@@ -1,0 +1,101 @@
+# ViciDial DB+Web Installation – Commands in Order
+# Alma Linux 9 | Based on technationals.com/dl/kt.txt (carpenox/dialer.one)
+
+# =============================================================================
+# 1. COMMON PREP (Step 1)
+# =============================================================================
+
+# Optional: English locale
+dnf install -y glibc-langpack-en
+localectl set-locale en_US.UTF-8
+
+# Timezone
+timedatectl set-timezone America/New_York
+
+# Updates
+dnf check-update
+dnf update -y
+
+# EPEL
+dnf install -y epel-release
+dnf update -y
+
+# Git and kernel packages
+dnf install -y git
+dnf install -y 'kernel*' --exclude='kernel-debug*'
+
+# Disable SELinux (required for ViciDial web)
+sed -i 's/SELINUX=permissive/SELINUX=disabled/g' /etc/selinux/config
+# If file has SELINUX=enforcing instead, use:
+# sed -i 's/SELINUX=enforcing/SELINUX=disabled/g' /etc/selinux/config
+
+# Clone install scripts
+cd /usr/src
+git clone https://github.com/carpenox/vicidial-install-scripts.git
+cd vicidial-install-scripts
+
+# Reboot (required so SELinux change takes effect)
+reboot
+
+# =============================================================================
+# 2. AFTER REBOOT – MAIN INSTALLER (Step 2)
+# =============================================================================
+
+cd /usr/src/vicidial-install-scripts
+chmod +x main-installer.sh
+./main-installer.sh
+# Interactive: enter your FQDN and server IP when prompted.
+
+# =============================================================================
+# 3. DB+WEB ONLY – DISABLE ASTERISK (Step 3)
+# =============================================================================
+
+# Stop Asterisk now
+screen -S asterisk -X quit
+
+# Edit /etc/rc.d/rc.local and comment out:
+#   - Asterisk log roll (ADMIN_restart_roll_logs.pl)
+#   - DAHDI (modprobe / dahdi_cfg)
+#   - sleep 20
+#   - start_asterisk_boot.pl
+
+# =============================================================================
+# 4. OPTIONAL – STANDARD DB IMPORT
+# =============================================================================
+
+cd /usr/src/vicidial-install-scripts
+chmod +x standard-db.sh
+./standard-db.sh
+# After import, add letter "a" to phone login field for each user if using standard DB.
+# Password for user 6666 after import: CyburDial2024
+
+# =============================================================================
+# 5. OPTIONAL – ALLOW MYSQL FROM DIALERS (cluster)
+# =============================================================================
+
+# In /etc/my.cnf.d/mariadb-server.cnf set:
+#   bind-address = 0.0.0.0
+# Then:
+systemctl restart mariadb
+
+# Firewall: allow MySQL from each dialer IP (replace DIALER_IP)
+firewall-cmd --permanent --add-rich-rule='rule family="ipv4" source address="DIALER_IP" port port="3306" protocol="tcp" accept'
+firewall-cmd --reload
+
+# =============================================================================
+# 6. POST-INSTALL (KB §2)
+# =============================================================================
+
+# First login: https://yourdomain.com — user 6666, password 1234 — then change password.
+
+# After changing password, lock firewall (remove HTTPS from public):
+firewall-cmd --permanent --remove-service=https
+firewall-cmd --reload
+
+# Dynamic portal redirect: edit
+#   /var/www/vhosts/dynportal/inc/defaults.inc.php
+# Set redirect URL to your domain, e.g. https://yourdomain.com/agc/vicidial.php
+
+# =============================================================================
+# END
+# =============================================================================

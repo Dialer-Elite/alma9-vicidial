@@ -1,0 +1,118 @@
+#!/bin/bash
+# VICIdial Alma 9 – system prep. Plan: 1 DB+Web + 4 Asterisk. Run as root, then reboot.
+set -e
+
+INSTALL_DIR="/usr/src/vicidial-install-scripts"
+STATE_FILE="/root/vicidial-alma9-setup/.prep-state"
+NEXT_STEPS="/root/vicidial-alma9-setup/NEXT-STEPS.txt"
+
+# =============================================================================
+# Constants. Args override. Unset below so env doesn't override.
+# =============================================================================
+# Role: "dbweb" | "asterisk"
+DEFAULT_ROLE="dbweb"
+# Hostname: unique per server
+DEFAULT_HOSTNAME="dbweb1"
+# Timezone: America/New_York, UTC, etc.
+DEFAULT_TIMEZONE="America/New_York"
+# FQDN: hostname only, no https:// (DB+Web)
+DEFAULT_FQDN="as-medi1.dialerelite.com"
+# DB+Web IP: for role=asterisk only
+DEFAULT_DB_SERVER_IP=""
+DEFAULT_LOCALE="en_US.UTF-8"
+# Reboot when done: "yes" | "no"
+DEFAULT_REBOOT="no"
+# Skip dnf update: "" | "yes"
+DEFAULT_SKIP_UPDATES="no"
+# Skip "Continue?" prompt: "yes" | "no"
+DEFAULT_CONFIRM_YES="yes"
+
+unset ROLE HOSTNAME TIMEZONE FQDN DB_SERVER_IP LOCALE DO_REBOOT SKIP_UPDATES CONFIRM_YES
+[[ "$EUID" -eq 0 ]] || { echo "Run as root." >&2; exit 1; }
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --role=*)         ROLE="${1#*=}" ;;
+    --hostname=*)     HOSTNAME="${1#*=}" ;;
+    --timezone=*)     TIMEZONE="${1#*=}" ;;
+    --fqdn=*)         FQDN="${1#*=}" ;;
+    --db-server-ip=*) DB_SERVER_IP="${1#*=}" ;;
+    --locale=*)       LOCALE="${1#*=}" ;;
+    --reboot)         DO_REBOOT="yes" ;;
+    --no-reboot)      DO_REBOOT="no" ;;
+    --skip-updates)   SKIP_UPDATES="yes" ;;
+    --yes)            CONFIRM_YES="yes" ;;
+    -h|--help)        echo "Usage: $0 [--role=dbweb|asterisk] [--hostname=NAME] [--timezone=TZ] [--fqdn=DOM] [--db-server-ip=IP] [--reboot|--no-reboot] [--skip-updates] [--yes]"; exit 0 ;;
+    *) echo "Unknown: $1" >&2; exit 1 ;;
+  esac
+  shift
+done
+
+ROLE="${ROLE:-$DEFAULT_ROLE}"
+HOSTNAME="${HOSTNAME:-$DEFAULT_HOSTNAME}"
+TIMEZONE="${TIMEZONE:-$DEFAULT_TIMEZONE}"
+FQDN="${FQDN:-$DEFAULT_FQDN}"
+DB_SERVER_IP="${DB_SERVER_IP:-$DEFAULT_DB_SERVER_IP}"
+LOCALE="${LOCALE:-$DEFAULT_LOCALE}"
+DO_REBOOT="${DO_REBOOT:-$DEFAULT_REBOOT}"
+SKIP_UPDATES="${SKIP_UPDATES:-$DEFAULT_SKIP_UPDATES}"
+CONFIRM_YES="${CONFIRM_YES:-$DEFAULT_CONFIRM_YES}"
+
+until [[ "$ROLE" == "dbweb" || "$ROLE" == "asterisk" ]]; do
+  read -rp "Role (1=dbweb 2=asterisk): " choice || true
+  case "$choice" in 1) ROLE="dbweb" ;; 2) ROLE="asterisk" ;; esac
+done
+while [[ -z "$HOSTNAME" ]]; do read -rp "Hostname: " HOSTNAME || true; done
+[[ -z "$TIMEZONE" ]] && read -rp "Timezone [$DEFAULT_TIMEZONE]: " TIMEZONE || true; TIMEZONE="${TIMEZONE:-$DEFAULT_TIMEZONE}"
+if [[ "$ROLE" == "dbweb" ]]; then
+  [[ -z "${FQDN+x}" || "$FQDN" = "" ]] && read -rp "FQDN (optional): " FQDN || true
+else
+  while [[ -z "$DB_SERVER_IP" ]]; do read -rp "DB+Web server IP: " DB_SERVER_IP || true; done
+fi
+[[ -z "$LOCALE" ]] && read -rp "Locale [$DEFAULT_LOCALE]: " LOCALE || true; LOCALE="${LOCALE:-$DEFAULT_LOCALE}"
+[[ -z "$DO_REBOOT" ]] && read -rp "Reboot when done? [Y/n]: " r || true && DO_REBOOT="${r:-Y}" && [[ "${DO_REBOOT,,}" =~ ^n ]] && DO_REBOOT="no" || DO_REBOOT="yes"
+[[ -z "$SKIP_UPDATES" ]] && read -rp "Skip dnf update? [y/N]: " s || true && SKIP_UPDATES="${s:-N}" && [[ "${SKIP_UPDATES,,}" =~ ^y ]] && SKIP_UPDATES="yes" || SKIP_UPDATES=""
+[[ "$CONFIRM_YES" != "yes" ]] && read -rp "Continue? [Y/n]: " go || true && [[ "${go,,}" =~ ^n ]] && exit 0
+
+dnf install -y glibc-langpack-en 2>/dev/null || true
+localectl set-locale "$LOCALE" 2>/dev/null || true
+timedatectl set-timezone "$TIMEZONE" 2>/dev/null || true
+[[ -z "$SKIP_UPDATES" ]] && { dnf check-update || true; dnf update -y; }
+dnf install -y epel-release git
+dnf install -y kernel* --exclude=kernel-debug* 2>/dev/null || true
+grep -q 'SELINUX=enforcing' /etc/selinux/config 2>/dev/null && sed -i 's/SELINUX=enforcing/SELINUX=disabled/g' /etc/selinux/config
+hostnamectl set-hostname "$HOSTNAME"
+systemctl enable crond; systemctl start crond 2>/dev/null || true
+[[ ! -d "$INSTALL_DIR" ]] && { cd /usr/src; git clone https://github.com/carpenox/vicidial-install-scripts.git; } || { cd "$INSTALL_DIR"; git pull; }
+chmod +x "$INSTALL_DIR/main-installer.sh" "$INSTALL_DIR/addon-dialer-alma9.sh" "$INSTALL_DIR/run-on-dialer-servers-cluster.sh" 2>/dev/null || true
+
+mkdir -p "$(dirname "$STATE_FILE")"
+printf "ROLE=%s\nHOSTNAME=%s\nTIMEZONE=%s\nFQDN=%s\nDB_SERVER_IP=%s\nINSTALL_DIR=%s\n" "$ROLE" "$HOSTNAME" "$TIMEZONE" "${FQDN:-}" "${DB_SERVER_IP:-}" "$INSTALL_DIR" > "$STATE_FILE"
+
+# Asterisk only: precondition — must be able to reach DB server on 3306
+if [[ "$ROLE" == "asterisk" && -n "$DB_SERVER_IP" ]]; then
+  echo "Checking DB connectivity: $DB_SERVER_IP:3306 ..."
+  if ! timeout 3 bash -c "echo >/dev/tcp/$DB_SERVER_IP/3306" 2>/dev/null; then
+    echo "ERROR: Cannot reach DB server $DB_SERVER_IP on port 3306."
+    echo "  On DB+Web server: ensure MySQL bind-address=0.0.0.0 (in /etc/my.cnf.d/mariadb-server.cnf), restart mariadb, and allow 3306 from this host in firewall."
+    echo "  Then retry s1.sh or run s2.sh after fixing."
+    exit 1
+  fi
+  echo "  DB reachable."
+fi
+
+if [[ "$ROLE" == "dbweb" ]]; then
+  cat > "$NEXT_STEPS" <<NEXT
+Reboot, then: cd $INSTALL_DIR && ./main-installer.sh (or use s2.sh to feed answers)
+After main-installer and reboot: run s3.sh to fix SSL, set FQDN (portal/CyburPhone), and disable Asterisk on DB+Web-only
+When asked for IP/FQDN use: ${FQDN:-this server IP}
+NEXT
+else
+  cat > "$NEXT_STEPS" <<NEXT
+Reboot, then run s2.sh (runs addon-dialer + run-on-dialer with DB IP: $DB_SERVER_IP)
+Then run s3.sh (sanity checks; do not run fix-ssl-secure.sh on dialer — that is DB+Web only)
+NEXT
+fi
+
+echo "Prep done. State: $STATE_FILE  Next: $NEXT_STEPS"
+[[ "$DO_REBOOT" == "yes" ]] && { sleep 5; reboot; } || echo "Reboot, then run installer (see $NEXT_STEPS)"

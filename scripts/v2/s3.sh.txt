@@ -1,0 +1,116 @@
+#!/bin/bash
+# Run this after the main-installer has run and the machine has rebooted.
+# - Fixes Apache when the upstream installer leaves a broken viciportal-ssl.conf
+# - Sets FQDN in portal, viciportal.conf, CyburPhone (from s1 state or hostname)
+# - Disables Asterisk/DAHDI in rc.local on DB+Web-only (when ROLE=dbweb from s1)
+# Safe to run multiple times.
+set -e
+
+[[ "$EUID" -eq 0 ]] || { echo "Run as root." >&2; exit 1; }
+
+STATE_FILE="/root/vicidial-alma9-setup/.prep-state"
+VICIPORTAL_SSL="/etc/httpd/conf.d/viciportal-ssl.conf"
+VICIPORTAL_SSL_DISABLED="/etc/httpd/conf.d/viciportal-ssl.conf.disabled"
+HOSTNAME=$(hostname -f 2>/dev/null || hostname)
+
+# FQDN and ROLE from s1 prep (so we don't have to do portal/CyburPhone/rc.local manually)
+FQDN=""
+ROLE=""
+if [[ -f "$STATE_FILE" ]]; then
+  # shellcheck source=/dev/null
+  . "$STATE_FILE" 2>/dev/null || true
+  FQDN="${FQDN:-}"
+  ROLE="${ROLE:-}"
+fi
+FQDN="${FQDN:-$HOSTNAME}"
+
+# -----------------------------------------------------------------------------
+# 1. Fix Apache: disable broken SSL vhost so httpd can start
+# -----------------------------------------------------------------------------
+if [[ -f "$VICIPORTAL_SSL" ]]; then
+  # Broken if ServerName is empty or cert paths are missing/empty
+  if grep -q "ServerName[[:space:]]*$" "$VICIPORTAL_SSL" || \
+     grep -q "letsencrypt/live//" "$VICIPORTAL_SSL" || \
+     ! [[ -f /etc/letsencrypt/live/$HOSTNAME/fullchain.pem ]]; then
+    mv -f "$VICIPORTAL_SSL" "$VICIPORTAL_SSL_DISABLED"
+    echo "[post-install] Disabled broken viciportal-ssl.conf so Apache can start."
+  fi
+fi
+
+# -----------------------------------------------------------------------------
+# 2. Ensure httpd is running (DB+Web and dialers may have it for RECORDINGS/MP3)
+# -----------------------------------------------------------------------------
+if systemctl is-enabled --quiet httpd 2>/dev/null; then
+  if ! systemctl is-active --quiet httpd; then
+    systemctl start httpd
+    echo "[post-install] Started httpd."
+  fi
+fi
+
+# -----------------------------------------------------------------------------
+# 3. Set FQDN in portal, viciportal.conf, CyburPhone (KB §2, §4.6)
+# -----------------------------------------------------------------------------
+if [[ -n "$FQDN" ]]; then
+  DEFAULTS_INC="/var/www/vhosts/dynportal/inc/defaults.inc.php"
+  VICIPORTAL_CONF="/etc/httpd/conf.d/viciportal.conf"
+  CYBURPHONE_PHP="/var/www/html/CyburPhone/cyburphone.php"
+
+  if [[ -f "$DEFAULTS_INC" ]]; then
+    sed -i "s|PORTAL_redirecturl='https://[^']*'|PORTAL_redirecturl='https://${FQDN}/agc/vicidial.php'|" "$DEFAULTS_INC" 2>/dev/null || true
+    sed -i "s|PORTAL_redirectadmin='https://[^']*'|PORTAL_redirectadmin='https://${FQDN}/admin.php'|" "$DEFAULTS_INC" 2>/dev/null || true
+    echo "[post-install] Set portal redirect URLs to https://${FQDN} in defaults.inc.php"
+  fi
+  if [[ -f "$VICIPORTAL_CONF" ]]; then
+    sed -i "s|ServerName .*|ServerName $FQDN|" "$VICIPORTAL_CONF" 2>/dev/null || true
+    echo "[post-install] Set ServerName $FQDN in viciportal.conf"
+  fi
+  if [[ -f "$CYBURPHONE_PHP" ]]; then
+    sed -i "s|\$referring_url = \"https://[^\"]*\"|\$referring_url = \"https://${FQDN}\"|" "$CYBURPHONE_PHP" 2>/dev/null || true
+    echo "[post-install] Set referring_url to https://${FQDN} in cyburphone.php"
+  fi
+fi
+
+# -----------------------------------------------------------------------------
+# 4. DB+Web-only: disable Asterisk/DAHDI in rc.local (KB §4.2, §11)
+# -----------------------------------------------------------------------------
+if [[ "$ROLE" == "dbweb" && -f /etc/rc.d/rc.local ]]; then
+  RCLOCAL="/etc/rc.d/rc.local"
+  if grep -q "^[^#]*start_asterisk_boot.pl" "$RCLOCAL" 2>/dev/null; then
+    sed -i 's|^\([[:space:]]*\)/usr/share/astguiclient/ADMIN_restart_roll_logs.pl|\1#/usr/share/astguiclient/ADMIN_restart_roll_logs.pl|' "$RCLOCAL" 2>/dev/null || true
+    sed -i 's|^\([[:space:]]*\)modprobe dahdi$|\1#modprobe dahdi|' "$RCLOCAL" 2>/dev/null || true
+    sed -i 's|^\([[:space:]]*\)modprobe dahdi_dummy$|\1#modprobe dahdi_dummy|' "$RCLOCAL" 2>/dev/null || true
+    sed -i 's|^\([[:space:]]*\)/usr/sbin/dahdi_cfg|\1#/usr/sbin/dahdi_cfg|' "$RCLOCAL" 2>/dev/null || true
+    sed -i 's|^\([[:space:]]*\)sleep 20$|\1#sleep 20|' "$RCLOCAL" 2>/dev/null || true
+    sed -i 's|^\([[:space:]]*\)/usr/share/astguiclient/start_asterisk_boot.pl|\1#/usr/share/astguiclient/start_asterisk_boot.pl|' "$RCLOCAL" 2>/dev/null || true
+    echo "[post-install] Asterisk/DAHDI disabled in rc.local (DB+Web-only)"
+  fi
+fi
+
+# -----------------------------------------------------------------------------
+# 5. Quick sanity checks (role-aware)
+# -----------------------------------------------------------------------------
+echo ""
+echo "--- Post-install checks (role=${ROLE:-unknown}) ---"
+if [[ "$ROLE" == "dbweb" ]]; then
+  for svc in mariadb httpd crond; do
+    if systemctl is-active --quiet "$svc"; then echo "  $svc: running"; else echo "  $svc: NOT RUNNING"; fi
+  done
+  echo "  asterisk: not running or not installed (expected on DB+Web-only)"
+  echo ""
+  echo "Next: run fix-ssl-secure.sh on this server, then log in at https://$(hostname -f 2>/dev/null || hostname)/ — user 6666, password 1234; change immediately."
+else
+  for svc in httpd crond; do
+    if systemctl is-active --quiet "$svc"; then echo "  $svc: running"; else echo "  $svc: NOT RUNNING"; fi
+  done
+  if systemctl is-active --quiet mariadb 2>/dev/null; then echo "  mariadb: running"; else echo "  mariadb: not running (expected on dialer — DB is on DB+Web server)"; fi
+  # DB connectivity (required for dialer; DB_SERVER_IP from state file sourced at top)
+  if [[ -n "${DB_SERVER_IP:-}" ]]; then
+    if timeout 3 bash -c "echo >/dev/tcp/$DB_SERVER_IP/3306" 2>/dev/null; then echo "  DB ($DB_SERVER_IP:3306): reachable"; else echo "  DB ($DB_SERVER_IP:3306): NOT reachable — fix firewall/MySQL on DB+Web"; fi
+  else
+    echo "  DB: unknown (no DB_SERVER_IP in state)"
+  fi
+  if command -v asterisk &>/dev/null && asterisk -rx "core show version" &>/dev/null; then echo "  asterisk: running"; else echo "  asterisk: NOT RUNNING"; fi
+  echo ""
+  echo "Next: reboot recommended (KB). Then verify: screen -ls, asterisk -rx \"core show version\", and DB connectivity from Admin."
+fi
+echo "See /root/vicidial-alma9-setup/NEXT-STEPS.txt for full steps."

@@ -1,0 +1,85 @@
+#!/bin/bash
+# Add a new dialer server to the ViciDial database (run on DB+Web server).
+# Works for the first add-on dialer and for every additional dialer (AST2, AST3, ...).
+
+echo "Enter the new dialer server IP to add:"
+read SERVERIP
+[ -z "$SERVERIP" ] && { echo "No IP entered. Exiting."; exit 1; }
+
+# MySQL auth: use MYSQL_ROOT_PASSWORD if set, else prompt once
+if [ -n "$MYSQL_ROOT_PASSWORD" ]; then
+  MYSQL_AUTH="-u root -p${MYSQL_ROOT_PASSWORD}"
+else
+  echo "Enter MySQL root password (or press Enter if none):"
+  read -s MYSQL_ROOT_PASSWORD
+  [ -n "$MYSQL_ROOT_PASSWORD" ] && MYSQL_AUTH="-u root -p${MYSQL_ROOT_PASSWORD}" || MYSQL_AUTH="-u root"
+fi
+
+SQLFILE="/usr/src/astguiclient/trunk/extras/second_server_install.sql"
+if [ ! -f "$SQLFILE" ]; then
+  echo "Error: $SQLFILE not found. Run this script on the DB+Web server where main-installer was used."
+  exit 1
+fi
+
+# Try to add placeholder (TESTast / 10.10.10.16). Succeeds only on first add-on; fails with duplicate on 2nd+.
+mysql $MYSQL_AUTH asterisk < "$SQLFILE" 2>/dev/null
+mysql $MYSQL_AUTH asterisk -e "UPDATE servers SET asterisk_version='18.21.0-vici' WHERE server_ip='10.10.10.16';" 2>/dev/null
+
+# If placeholder exists now, this is the first add-on: update it to the new dialer IP
+HAS_PLACEHOLDER=$(mysql $MYSQL_AUTH -N -e "SELECT COUNT(*) FROM asterisk.servers WHERE server_ip='10.10.10.16';" asterisk 2>/dev/null)
+if [ "$HAS_PLACEHOLDER" = "1" ]; then
+  # First add-on: update placeholder to this dialer's IP
+  echo "First add-on dialer: updating placeholder 10.10.10.16 to $SERVERIP"
+  /usr/share/astguiclient/ADMIN_update_server_ip.pl --old-server_ip=10.10.10.16 --server_ip=$SERVERIP
+  mysql $MYSQL_AUTH asterisk -e "UPDATE servers SET asterisk_version='18.21.0-vici' WHERE server_ip='$SERVERIP';" 2>/dev/null
+else
+  # Second+ add-on: SQL file would duplicate server_id 'TESTast', so add a new server row with unique ID
+  # Find next free server_id: AST2, AST3, ...
+  NEXT_ID=$(mysql $MYSQL_AUTH -N -e "
+    SELECT CONCAT('AST', n) FROM (
+      SELECT 2 AS n UNION SELECT 3 UNION SELECT 4 UNION SELECT 5 UNION SELECT 6 UNION SELECT 7 UNION SELECT 8 UNION SELECT 9 UNION SELECT 10
+    ) nums
+    WHERE CONCAT('AST', n) NOT IN (SELECT server_id FROM asterisk.servers)
+    ORDER BY n LIMIT 1;
+  " 2>/dev/null)
+  [ -z "$NEXT_ID" ] && NEXT_ID="AST2"
+
+  echo "Adding dialer as server_id=$NEXT_ID with server_ip=$SERVERIP"
+  mysql $MYSQL_AUTH asterisk -e "
+    SET @sid = '$NEXT_ID';
+    SET @ip = '$SERVERIP';
+    INSERT INTO servers (
+      server_id, server_description, server_ip, active, asterisk_version,
+      max_vicidial_trunks, telnet_host, telnet_port,
+      ASTmgrUSERNAME, ASTmgrSECRET, ASTmgrUSERNAMEupdate, ASTmgrUSERNAMElisten, ASTmgrUSERNAMEsend,
+      local_gmt, voicemail_dump_exten, answer_transfer_agent, ext_context,
+      sys_perf_log, vd_server_logs, agi_output, active_asterisk_server,
+      generate_vicidial_conf, rebuild_conf_files, outbound_calls_per_second, sysload,
+      active_agent_login_server
+    )
+    SELECT @sid, CONCAT('Dialer ', @ip), @ip, 'Y', asterisk_version,
+      max_vicidial_trunks, telnet_host, telnet_port,
+      ASTmgrUSERNAME, ASTmgrSECRET, ASTmgrUSERNAMEupdate, ASTmgrUSERNAMElisten, ASTmgrUSERNAMEsend,
+      local_gmt, voicemail_dump_exten, answer_transfer_agent, ext_context,
+      sys_perf_log, vd_server_logs, agi_output, active_asterisk_server,
+      generate_vicidial_conf, rebuild_conf_files, outbound_calls_per_second, sysload,
+      active_agent_login_server
+    FROM asterisk.servers WHERE server_id = 'TESTast' LIMIT 1;
+
+    INSERT IGNORE INTO server_updater (server_ip, last_update) VALUES (@ip, NULL);
+  " 2>/dev/null
+
+  # Add confbridges (same range as other dialers)
+  mysql $MYSQL_AUTH asterisk -e "
+    SET @ip = '$SERVERIP';
+    INSERT IGNORE INTO vicidial_confbridges (conf_exten, server_ip, extension, leave_3way, leave_3way_datetime)
+    SELECT t.conf_exten, @ip, '', '0', NULL
+    FROM (SELECT conf_exten FROM vicidial_confbridges WHERE server_ip = (SELECT server_ip FROM asterisk.servers WHERE server_id = 'TESTast' LIMIT 1) LIMIT 300) AS t;
+  " 2>/dev/null
+fi
+
+echo "Done. Dialer $SERVERIP added. On that server run addon-dialer-alma9.sh then run-on-dialer-servers-cluster.sh with this DB server IP."
+</think>
+Running the SQL first to add the placeholder when it's the first add-on:
+<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>
+StrReplace

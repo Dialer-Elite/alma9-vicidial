@@ -1,0 +1,39 @@
+Post-s2.sh Steps for VICIdial Dialer (Asterisk-only) Servers
+===========================================================
+Run these after s2.sh completes. Dialer won't show in reports without them.
+
+1. FIX astguiclient.conf
+   ---------------------
+   DIALER_IP=$(hostname -I | awk '{print $1}')
+   DB_PASS='ViciDB_6y5e1v_e6W'   # Must match s2.sh --db-cron-password / DB server
+
+   - Set VARserver_ip:
+     sed -i "s/^VARserver_ip => .*/VARserver_ip => $DIALER_IP/" /etc/astguiclient.conf
+
+   - Set DB passwords:
+     perl -i -pe "s/^VARDB_pass => .*/VARDB_pass => $DB_PASS/" /etc/astguiclient.conf
+     perl -i -pe "s/^VARDB_custom_pass => .*/VARDB_custom_pass => $DB_PASS/" /etc/astguiclient.conf
+
+2. ADD DIALER TO servers TABLE (on DB server or from dialer if mysql client works)
+   --------------------------------------------------------------------------------
+   mysql -h <DB_SERVER_IP> -u cron -p'ViciDB_6y5e1v_e6W' asterisk -e "
+   INSERT INTO servers (server_id, server_description, server_ip, active, asterisk_version, local_gmt)
+   SELECT 'dialerX', 'Dialer <hostname>', '<THIS_DIALER_IP>', 'Y', '18.18.1', '-5.00'
+   WHERE NOT EXISTS (SELECT 1 FROM servers WHERE server_ip = '<THIS_DIALER_IP>');
+   INSERT INTO server_updater (server_ip, last_update) VALUES ('<THIS_DIALER_IP>', '') ON DUPLICATE KEY UPDATE server_ip=server_ip;
+   "
+   (Replace dialerX with hostname suffix, <hostname>, <THIS_DIALER_IP>, <DB_SERVER_IP>)
+
+3. START ASTERISK
+   --------------
+   /usr/share/astguiclient/start_asterisk_boot.pl
+
+4. START KEEPALIVE
+   ---------------
+   /usr/share/astguiclient/ADMIN_keepalive_ALL.pl --cu3way
+
+5. VERIFY
+   ------
+   asterisk -rx "core show version"
+   screen -ls
+   # Dialer should appear in Admin -> Servers and reports

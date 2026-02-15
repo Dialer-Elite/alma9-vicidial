@@ -1,0 +1,53 @@
+#!/bin/bash
+# Run this after the main-installer has run and the machine has rebooted.
+# Fixes Apache when the upstream installer leaves a broken viciportal-ssl.conf
+# (empty ServerName or missing SSL certs). Safe to run multiple times.
+set -e
+
+[[ "$EUID" -eq 0 ]] || { echo "Run as root." >&2; exit 1; }
+
+VICIPORTAL_SSL="/etc/httpd/conf.d/viciportal-ssl.conf"
+VICIPORTAL_SSL_DISABLED="/etc/httpd/conf.d/viciportal-ssl.conf.disabled"
+HOSTNAME=$(hostname -f 2>/dev/null || hostname)
+
+# -----------------------------------------------------------------------------
+# 1. Fix Apache: disable broken SSL vhost so httpd can start
+# -----------------------------------------------------------------------------
+if [[ -f "$VICIPORTAL_SSL" ]]; then
+  # Broken if ServerName is empty or cert paths are missing/empty
+  if grep -q "ServerName[[:space:]]*$" "$VICIPORTAL_SSL" || \
+     grep -q "letsencrypt/live//" "$VICIPORTAL_SSL" || \
+     ! [[ -f /etc/letsencrypt/live/$HOSTNAME/fullchain.pem ]]; then
+    mv -f "$VICIPORTAL_SSL" "$VICIPORTAL_SSL_DISABLED"
+    echo "[post-install] Disabled broken viciportal-ssl.conf so Apache can start."
+  fi
+fi
+
+# -----------------------------------------------------------------------------
+# 2. Ensure httpd is running
+# -----------------------------------------------------------------------------
+if ! systemctl is-active --quiet httpd; then
+  systemctl start httpd
+  echo "[post-install] Started httpd."
+fi
+
+# -----------------------------------------------------------------------------
+# 3. Quick sanity checks
+# -----------------------------------------------------------------------------
+echo ""
+echo "--- Post-install checks ---"
+for svc in mariadb httpd crond; do
+  if systemctl is-active --quiet "$svc"; then
+    echo "  $svc: running"
+  else
+    echo "  $svc: NOT RUNNING"
+  fi
+done
+if command -v asterisk &>/dev/null && asterisk -rx "core show version" &>/dev/null; then
+  echo "  asterisk: running"
+else
+  echo "  asterisk: not running or not installed (expected on DB+Web-only)"
+fi
+echo ""
+echo "Next: log in at https://$(hostname -f 2>/dev/null || hostname)/ or https://$(hostname -I | awk '{print $1}')/ — user 6666, password 1234; change immediately."
+echo "See /root/vicidial-alma9-setup/NEXT-STEPS.txt for full steps."

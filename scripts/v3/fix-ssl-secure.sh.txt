@@ -1,0 +1,122 @@
+#!/bin/bash
+# Fix "Not secure" for https://as-medi1.dialerelite.com
+# Run as root ON the DB+Web server (as-medi1.dialerelite.com).
+# Requires: DNS for as-medi1.dialerelite.com must point to this server; port 80 reachable from internet for Let's Encrypt.
+set -e
+
+DOMAIN="as-medi1.dialerelite.com"
+SSL_EMAIL="${SSL_EMAIL:-info@dialerelite.com}"
+VICIPORTAL_SSL="/etc/httpd/conf.d/viciportal-ssl.conf"
+VICIPORTAL_SSL_DISABLED="/etc/httpd/conf.d/viciportal-ssl.conf.disabled"
+CERT_PATH="/etc/letsencrypt/live/$DOMAIN"
+
+[[ "$EUID" -eq 0 ]] || { echo "Run as root." >&2; exit 1; }
+
+echo "=== Fixing SSL for $DOMAIN ==="
+
+# 0. Verify DNS points to this machine
+echo "Checking DNS: $DOMAIN should resolve to this server's IP..."
+DNS_IPS=$(getent ahosts "$DOMAIN" 2>/dev/null | awk '{print $1}' | sort -u) || \
+  DNS_IPS=$(host -t A "$DOMAIN" 2>/dev/null | grep "has address" | awk '{print $NF}' | sort -u) || \
+  DNS_IPS=""
+MACHINE_IPS=$(hostname -I 2>/dev/null | tr ' ' '\n' | sort -u)
+# Also get public IP (in case server is behind NAT or we're comparing to external view)
+PUBLIC_IP=$(curl -s --max-time 5 ifconfig.me 2>/dev/null || curl -s --max-time 5 icanhazip.com 2>/dev/null || true)
+
+if [[ -z "$DNS_IPS" ]]; then
+  echo "ERROR: Could not resolve $DOMAIN (DNS lookup failed). Fix DNS before running Let's Encrypt."
+  exit 1
+fi
+
+MATCH=""
+for ip in $DNS_IPS; do
+  for my in $MACHINE_IPS; do
+    [[ "$ip" == "$my" ]] && { MATCH=1; break 2; }
+  done
+  [[ -n "$PUBLIC_IP" && "$ip" == "$PUBLIC_IP" ]] && { MATCH=1; break; }
+done
+
+if [[ -z "$MATCH" ]]; then
+  echo "ERROR: DNS for $DOMAIN resolves to: $(echo $DNS_IPS)"
+  echo "       This server's IP(s): $(echo $MACHINE_IPS)"
+  [[ -n "$PUBLIC_IP" ]] && echo "       This server's public IP: $PUBLIC_IP"
+  echo "       They do not match. Point $DOMAIN to this server's IP and try again."
+  exit 1
+fi
+echo "  DNS OK: $DOMAIN -> $(echo $DNS_IPS) (matches this server)"
+echo ""
+
+# 1. Ensure certbot and Apache SSL are installed
+if ! command -v certbot &>/dev/null; then
+  echo "Installing certbot..."
+  dnf install -y certbot python3-certbot-apache mod_ssl
+fi
+
+# 1b. Ensure port 80 has a vhost with ServerName so certbot can use it
+HTTP_VHOST="/etc/httpd/conf.d/viciportal-http.conf"
+if ! grep -q "ServerName[[:space:]]*$DOMAIN" /etc/httpd/conf.d/*.conf 2>/dev/null; then
+  echo "Adding HTTP vhost for $DOMAIN on port 80 (required for Let's Encrypt)..."
+  cat > "$HTTP_VHOST" <<EOF
+<VirtualHost *:80>
+    ServerName $DOMAIN
+    DocumentRoot "/var/www/html"
+    DirectoryIndex index.html
+    ErrorLog logs/http_$DOMAIN.error_log
+    CustomLog logs/http_$DOMAIN.access_log combined
+</VirtualHost>
+EOF
+  systemctl reload httpd 2>/dev/null || true
+fi
+
+# 2. Obtain Let's Encrypt certificate (port 80 must be reachable)
+if [[ ! -f "$CERT_PATH/fullchain.pem" ]]; then
+  echo "Obtaining Let's Encrypt certificate for $DOMAIN (stop firewalld so port 80 is open)..."
+  systemctl stop firewalld 2>/dev/null || true
+  certbot --apache -d "$DOMAIN" --email "$SSL_EMAIL" --agree-tos --non-interactive
+  systemctl start firewalld 2>/dev/null || true
+  echo "Certificate installed."
+else
+  echo "Certificate already exists at $CERT_PATH"
+fi
+
+if [[ ! -f "$CERT_PATH/fullchain.pem" ]]; then
+  echo "ERROR: Could not obtain certificate. Check:"
+  echo "  - DNS: $DOMAIN must resolve to this server's public IP"
+  echo "  - Port 80 must be reachable from the internet (firewall, NAT)"
+  echo "  - Run with firewalld stopped if needed: systemctl stop firewalld && certbot --apache -d $DOMAIN --email $SSL_EMAIL --agree-tos"
+  exit 1
+fi
+
+# 3. Re-enable and fix viciportal-ssl.conf for port 443 (ViciDial welcome page)
+#    The disabled file was for port 446 + broken paths; we need a proper 443 vhost with LE certs.
+if [[ -f "$VICIPORTAL_SSL_DISABLED" ]]; then
+  echo "Re-enabling and fixing viciportal-ssl.conf..."
+  cat > "$VICIPORTAL_SSL" <<EOF
+<VirtualHost *:443>
+    ServerName $DOMAIN
+    ServerAdmin root@$DOMAIN
+    DocumentRoot "/var/www/html"
+    SSLEngine on
+    SSLCertificateFile $CERT_PATH/fullchain.pem
+    SSLCertificateKeyFile $CERT_PATH/privkey.pem
+    ErrorLog logs/ssl_error_log
+    CustomLog logs/ssl_access_log combined
+</VirtualHost>
+EOF
+  # Remove the disabled file so we don't have two configs
+  rm -f "$VICIPORTAL_SSL_DISABLED"
+else
+  # Already have a file; ensure it has correct ServerName and cert paths
+  sed -i "s|ServerName.*|ServerName $DOMAIN|" "$VICIPORTAL_SSL" 2>/dev/null || true
+  sed -i "s|SSLCertificateFile.*|SSLCertificateFile $CERT_PATH/fullchain.pem|" "$VICIPORTAL_SSL" 2>/dev/null || true
+  sed -i "s|SSLCertificateKeyFile.*|SSLCertificateKeyFile $CERT_PATH/privkey.pem|" "$VICIPORTAL_SSL" 2>/dev/null || true
+fi
+
+# 4. Ensure default SSL vhost doesn't take over (optional: leave 443 to our vhost only)
+#    AlmaLinux ssl.conf has <VirtualHost _default_:443>; our vhost with ServerName will be used when Host: matches.
+echo "Reloading Apache..."
+systemctl reload httpd
+
+echo ""
+echo "Done. Visit https://$DOMAIN/vicidial/welcome.php — it should show as secure (valid Let's Encrypt certificate)."
+echo "If you locked down HTTPS from public zone earlier, re-add if needed: firewall-cmd --permanent --add-service=https && firewall-cmd --reload"
