@@ -1,5 +1,9 @@
 firewall-cmd --permanent --add-port=8089/tcp
 firewall-cmd --permanent --add-port=10000-20000/udp
 
+# Open port for DB on db server
+firewall-cmd --permanent --add-port=3306/tcp
+
+
 firewall-cmd --reload
 firewall-cmd --list-ports
