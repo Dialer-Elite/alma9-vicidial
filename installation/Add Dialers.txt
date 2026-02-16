@@ -5,10 +5,10 @@
 # =============================================================================
 # PREREQUISITES
 # =============================================================================
-# - One DB+Web server already running (main-installer, Asterisk disabled).
-# - MySQL on DB+Web: bind-address = 0.0.0.0, firewall allows 3306 from dialer IPs.
-# - You know: DB+Web server IP, and the IP of each new dialer server.
-# - Each new dialer: Alma Linux 9, fresh or minimal install.
+1 - One DB+Web server already running (main-installer, Asterisk disabled).
+2 - MySQL on DB+Web: bind-address = 0.0.0.0, firewall allows 3306 from dialer IPs.
+3 - You know: DB+Web server IP, and the IP of each new dialer server.
+4 - Each new dialer: Alma Linux 9, fresh or minimal install.
 
 # =============================================================================
 # COMMON PREP (on every new dialer server, before addon scripts)
@@ -64,9 +64,12 @@ chmod +x add-dialer-to-DB.sh
 # =============================================================================
 
 -------- Make sure database is accessible if not change the db password --------------------
-
-asterisk config	vi /etc/asterisk/asterisk.conf
-db password, etc	vi /etc/astguiclient.conf
+Command to check : 
+mysql -h hostIP -u root -p asterisk
+asterisk config	
+vi /etc/asterisk/asterisk.conf
+Verify db password, etc	
+vi /etc/astguiclient.conf
 -------------------------------------------------------
 cd /usr/src/vicidial-install-scripts
 chmod +x addon-dialer-alma9.sh
