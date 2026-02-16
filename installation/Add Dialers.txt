@@ -53,6 +53,8 @@ reboot
 # Run this on the DB+Web server BEFORE or right after installing the dialer.
 # Replace DIALER_IP with the new dialer server's IP.
 
+firewall-cmd --permanent --add-rich-rule='rule family="ipv4" source address="DIALER_IP" port port="3306" protocol="tcp" accept'
+
 cd /usr/src/vicidial-install-scripts
 chmod +x add-dialer-to-DB.sh
 ./add-dialer-to-DB.sh
