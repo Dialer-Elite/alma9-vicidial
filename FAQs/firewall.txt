@@ -4,6 +4,8 @@ firewall-cmd --permanent --add-port=10000-20000/udp
 # Open port for DB on db server
 firewall-cmd --permanent --add-port=3306/tcp
 
+# After opening the port quick test for db
+mysql -h DB_SERVER_IP -u cron -p -e "SELECT 1;"
 
 firewall-cmd --reload
 firewall-cmd --list-ports
