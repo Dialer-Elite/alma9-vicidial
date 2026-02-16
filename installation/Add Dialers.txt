@@ -54,6 +54,10 @@ reboot
 # Replace DIALER_IP with the new dialer server's IP.
 
 firewall-cmd --permanent --add-rich-rule='rule family="ipv4" source address="DIALER_IP" port port="3306" protocol="tcp" accept'
+# Open port for DB on db server
+firewall-cmd --permanent --add-port=3306/tcp
+
+
 
 cd /usr/src/vicidial-install-scripts
 chmod +x add-dialer-to-DB.sh
@@ -64,11 +68,8 @@ chmod +x add-dialer-to-DB.sh
 # =============================================================================
 # STEP B: ON THE NEW DIALER SERVER (Alma 9, after common prep + reboot)
 # =============================================================================
-cd /usr/src/vicidial-install-scripts
-chmod +x addon-dialer-alma9.sh
-./addon-dialer-alma9.sh
-# Wait for it to finish.
-
+# After opening the port quick test for db
+mysql -h DB_SERVER_IP -u cron -p -e "SELECT 1;"
 -------- Make sure database is accessible if not change the db password --------------------
 Command to check : 
 mysql -h hostIP -u root -p asterisk
@@ -77,6 +78,14 @@ vi /etc/asterisk/asterisk.conf
 Verify db password, etc	
 vi /etc/astguiclient.conf
 -------------------------------------------------------
+
+
+cd /usr/src/vicidial-install-scripts
+chmod +x addon-dialer-alma9.sh
+./addon-dialer-alma9.sh
+# Wait for it to finish.
+
+
 
 
 # Link this dialer to the DB+Web server
