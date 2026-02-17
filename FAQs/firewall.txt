@@ -1,3 +1,13 @@
+firewall-cmd --permanent --add-port=81/tcp
+firewall-cmd --add-service=http --zone=trusted --permanent
+firewall-cmd --permanent --remove-service=https
+
+nano /var/www/vhosts/dynportal/inc/defaults.inc.php
+https://my.dialer.one:446/valid8.php
+
+firewall-cmd --reload
+
+# Check if the dialer works without below changes.
 firewall-cmd --permanent --add-port=8089/tcp
 firewall-cmd --permanent --add-port=10000-20000/udp
 
